@@ -1,21 +1,33 @@
+#https://pubmed.ncbi.nlm.nih.gov/help/#using-search-field-tags
+
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load(httr,stringr,readxl,dplyr,xlsx,shiny,shinythemes)
+pacman::p_load(httr, stringr, readxl, dplyr, xlsx, shiny, shinythemes, easyPubMed)
 
 ui <- fluidPage(
   theme = shinytheme("darkly"),
   titlePanel("GPT API Interface"),
   sidebarLayout(
     sidebarPanel(
-      fileInput("file", "Upload Excel File", accept = c("xlsx")),
+      radioButtons("data_source", "Data source", choices = c("Upload Excel File", "PubMed Search"), selected = "Upload Excel File"),
+      conditionalPanel(
+        condition = "input.data_source == 'Upload Excel File'",
+        fileInput("file", "Upload Excel File", accept = c("xlsx"))
+      ),
+      conditionalPanel(
+        condition = "input.data_source == 'PubMed Search'",
+        textInput("pubmed_query", "PubMed Query", value = "")
+      ),
+      actionButton("view", "Apperçu"),
       textInput("id_var", "Nom de la colonne d'identifiant", value = ""),
       textInput("contenu_var", "Nom de la colonne de contenu", value = ""),
       textInput("api_key", "Clé API", value = ""),
       selectInput("model", "Model", choices = c("gpt-4", "gpt-3.5-turbo"), selected = "gpt-4"),
-      sliderInput("temperature", "Temperature", value = 0,min = 0, max=1, step = .1,width="50%"),
-      textAreaInput("message_system", "Message de système (contexte à assigner)", 
+      sliderInput("temperature", "Temperature", value = 0, min = 0, max=1, step = .1, width="50%"),
+      textAreaInput("message_system", "Message pour GPT",
                     placeholder = "Tu es un expert de revue de littérature. Tu détecte la pertinence d'un article à partir du sommaire...",value = "",height="150px", resize="vertical"),
-      textAreaInput("message_user_debut", "Messager usager (petit prompt avant le contenu)",
-                    placeholder = "Voici un sommaire: ",value = "", height="50px", resize="vertical"),
+      # textAreaInput("message_user_debut", "Messager usager (petit prompt avant le contenu)",
+      #               placeholder = "Voici un sommaire: ",value = "", height="50px", resize="vertical"),
+      
       actionButton("submit", "Soumettre"),
       downloadButton("downloadData", "Télécharger")
     ),
@@ -40,66 +52,93 @@ ui <- fluidPage(
       tags$div(id = "scrollBox",
                tableOutput("result"))
     )
+    
   )
 )
 
+
 server <- function(input, output) {
   
-  result_data <- eventReactive(input$submit, {
-    req(input$file)
+  rv <- reactiveValues(data = NULL, result_data = NULL)
+  
+  observeEvent(input$view, {
+    if (input$data_source == 'Upload Excel File') {
+      req(input$file)
+      rv$data <- read.xlsx(input$file$datapath, sheetIndex = 1)
+    } else if (input$data_source == 'PubMed Search') {
+      req(input$pubmed_query)
+      my_query <- get_pubmed_ids(input$pubmed_query)
+      my_abstracts_xml <- fetch_pubmed_data(my_query)
+      all_xml <- articles_to_list(my_abstracts_xml, simplify = F)
+      rv$data <- lapply(all_xml, article_to_df, max_chars = -1, getAuthors = FALSE, getKeywords=T) %>% bind_rows()
+    }
     
-    data <- read.xlsx(input$file$datapath,sheetIndex = 1)
     
-    gpt_api<-function(data, id_var, contenu_var, api_key,model,temperature,message_system,message_user_debut){
+    output$result <- renderTable({
+      req(rv$data)
+      rv$data
+    }, rownames = FALSE)
+    
+  })
+  
+  observeEvent(input$submit, {
+    req(rv$data)
+    
+    data <- rv$data
+    
+    gpt_api<-function(data, id_var, contenu_var  , api_key, model, temperature, 
+                      message_system#, message_user_debut
+                      ){
       response <- POST(
-        url = "https://api.openai.com/v1/chat/completions", 
-        add_headers(Authorization = paste("Bearer", api_key)),content_type_json(),encode = "json",
+        url = "https://api.openai.com/v1/chat/completions",
+        add_headers(Authorization = paste("Bearer", api_key)), content_type_json(), encode = "json",
         body = list(
           model = model,
-          messages = list(list(role = "system", 
+          messages = list(list(role = "system",
                                content = message_system),
-                          list(role = "user", 
-                               content = paste(message_user_debut,"\n",
+                          list(role = "user",
+                               content = paste("\n",
                                                data[[contenu_var]]))),
-          temperature=temperature))
-      data.frame(ID=data[[id_var]],Contenu=data[[contenu_var]],
-                 reponse_gpt=ifelse(response$status==200, 
-                                    unlist(content(response)$choices[[1]]$message$content),NA))}
+          temperature = temperature)
+      )
+      data.frame(ID = data[[id_var]], Contenu = data[[contenu_var]],
+                 reponse_gpt = ifelse(response$status == 200,
+                                      unlist(content(response)$choices[[1]]$message$content), NA))
+    }
     
     withProgress(message = 'En cours', value = 0, {
       results <- lapply(1:nrow(data), function(x) {
-        
         incProgress(1/nrow(data))
-        
-        gpt_api(data = data[x,]
-                ,id_var = input$id_var
-                ,contenu_var = input$contenu_var
-                ,model = input$model
-                ,temperature = input$temperature
-                ,api_key = input$api_key
-                ,message_system = input$message_system
-                ,message_user_debut = input$message_user_debut
-        )
+        gpt_api(data = data[x,],
+                id_var = input$id_var,
+                contenu_var = input$contenu_var,
+                model = input$model,
+                temperature = input$temperature,
+                api_key = input$api_key,
+                message_system = input$message_system)#,
+               # message_user_debut = input$message_user_debut)
       }) %>% bind_rows
     })
     
-    colnames(results)<-c(input$id_var,input$contenu_var,"output_gpt")
+    colnames(results) <- c(input$id_var, input$contenu_var, "output_gpt")
     
-    results
+    rv$result_data <- results
     
-  }, ignoreNULL = FALSE)
+    output$result <- renderTable({
+      req(rv$result_data)
+      rv$result_data
+    }, rownames = FALSE)
+    
+    })
   
-  output$result <- renderTable({
-    req(result_data())
-    result_data()
-  }, rownames = TRUE)
+ 
   
   output$downloadData <- downloadHandler(
     filename = function() {
-      paste("data-", Sys.time(), ".xlsx", sep="")
+      paste("data-", Sys.time(), ".xlsx", sep = "")
     },
     content = function(file) {
-      xlsx::write.xlsx(result_data(), file, row.names = FALSE)
+      xlsx::write.xlsx(rv$result_data, file, row.names = FALSE)
     }
   )
 }
