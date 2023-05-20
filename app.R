@@ -19,7 +19,7 @@ ui <- fluidPage(
       ),
       actionButton("view", "Apperçu"),
       textInput("id_var", "Nom de la colonne d'identifiant", value = ""),
-      textInput("contenu_var", "Nom de la colonne de contenu", value = ""),
+      textInput("contenu_var", "Nom(s) de colonne(s) de contenu (séparés par virgule si plusieurs)", value = ""),
       textInput("api_key", "Clé API", value = ""),
       selectInput("model", "Model", choices = c("gpt-4", "gpt-3.5-turbo"), selected = "gpt-4"),
       sliderInput("temperature", "Temperature", value = 0, min = 0, max=1, step = .1, width="50%"),
@@ -88,7 +88,9 @@ server <- function(input, output) {
     
     gpt_api<-function(data, id_var, contenu_var  , api_key, model, temperature, 
                       message_system#, message_user_debut
-                      ){
+    ){
+      contenu_var<-strsplit(contenu_var,",") %>% unlist %>% gsub(" ","",.)
+      
       response <- POST(
         url = "https://api.openai.com/v1/chat/completions",
         add_headers(Authorization = paste("Bearer", api_key)), content_type_json(), encode = "json",
@@ -97,11 +99,12 @@ server <- function(input, output) {
           messages = list(list(role = "system",
                                content = message_system),
                           list(role = "user",
-                               content = paste("\n",
-                                               data[[contenu_var]]))),
+                               content = paste0("\n",
+                                                apply(data[contenu_var], 1, paste, collapse='\n\n')))
+          ),
           temperature = temperature)
       )
-      data.frame(ID = data[[id_var]], Contenu = data[[contenu_var]],
+      data.frame(ID = data[[id_var]], Contenu = apply(data[contenu_var], 1, paste, collapse='\n\n'),
                  reponse_gpt = ifelse(response$status == 200,
                                       unlist(content(response)$choices[[1]]$message$content), NA))
     }
@@ -116,7 +119,7 @@ server <- function(input, output) {
                 temperature = input$temperature,
                 api_key = input$api_key,
                 message_system = input$message_system)#,
-               # message_user_debut = input$message_user_debut)
+        # message_user_debut = input$message_user_debut)
       }) %>% bind_rows
     })
     
@@ -129,9 +132,9 @@ server <- function(input, output) {
       rv$result_data
     }, rownames = FALSE)
     
-    })
+  })
   
- 
+  
   
   output$downloadData <- downloadHandler(
     filename = function() {
