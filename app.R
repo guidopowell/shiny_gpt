@@ -5,19 +5,40 @@ pacman::p_load(httr, stringr, readxl, dplyr, xlsx, shiny, shinythemes, easyPubMe
 
 ui <- fluidPage(
   theme = shinytheme("darkly"),
-  titlePanel("GPT API Interface"),
+  titlePanel("PubMed Search and GPT API Interface"),
   sidebarLayout(
     sidebarPanel(
-      radioButtons("data_source", "Data source", choices = c("Upload Excel File", "PubMed Search"), selected = "Upload Excel File"),
+      radioButtons("data_source", "Data source", choices = c("Upload Excel File", "PubMed Search"), selected = "PubMed Search"),
+      
+      # Conditional panel for uploading an Excel file
       conditionalPanel(
         condition = "input.data_source == 'Upload Excel File'",
         fileInput("file", "Upload Excel File", accept = c("xlsx"))
       ),
+      
+      # Conditional panel for PubMed search
       conditionalPanel(
         condition = "input.data_source == 'PubMed Search'",
-        textInput("pubmed_query", "PubMed Query", value = "")
+        tags$div(
+          id = "div_1",
+          textInput("search_term_1", "Search term"),
+          selectInput("search_tag_1", "Search tag", choices = list(
+            "All Fields" = "[all]",
+            "Author" = "[au]",
+            "Editor" = "[ed]",
+            "Journal" = "[ta]",
+            "Language" = "[la]",
+            "MeSH Terms" = "[mh]",
+            "Publication Date" = "[dp]",
+            "Title" = "[ti]",
+            "Title/Abstract" = "[tiab]"
+          ))
+        ),
+        actionButton("add", "Add search term"),
+        tags$div(id = "search_terms")
       ),
-      actionButton("view", "Apperçu"),
+      
+      actionButton("view", "View"),
       textInput("id_var", "Nom de la colonne d'identifiant", value = ""),
       textInput("contenu_var", "Nom(s) de colonne(s) de contenu (séparés par virgule si plusieurs)", value = ""),
       textInput("api_key", "Clé API", value = ""),
@@ -25,10 +46,7 @@ ui <- fluidPage(
       sliderInput("temperature", "Temperature", value = 0, min = 0, max=1, step = .1, width="50%"),
       textAreaInput("message_system", "Message pour GPT",
                     placeholder = "Tu es un expert de revue de littérature. Tu détecte la pertinence d'un article à partir du sommaire...",value = "",height="150px", resize="vertical"),
-      # textAreaInput("message_user_debut", "Messager usager (petit prompt avant le contenu)",
-      #               placeholder = "Voici un sommaire: ",value = "", height="50px", resize="vertical"),
-      
-      actionButton("submit", "Soumettre"),
+      actionButton("submit", "submit"),
       downloadButton("downloadData", "Télécharger")
     ),
     mainPanel(
@@ -52,35 +70,63 @@ ui <- fluidPage(
       tags$div(id = "scrollBox",
                tableOutput("result"))
     )
-    
   )
 )
 
 
-server <- function(input, output) {
-  
+server <- function(input, output, session) {
   rv <- reactiveValues(data = NULL, result_data = NULL)
+  num_search_terms <- reactiveVal(1)
   
   observeEvent(input$view, {
+    
     if (input$data_source == 'Upload Excel File') {
       req(input$file)
       rv$data <- read.xlsx(input$file$datapath, sheetIndex = 1)
     } else if (input$data_source == 'PubMed Search') {
-      req(input$pubmed_query)
-      my_query <- get_pubmed_ids(input$pubmed_query)
+      
+      query_parts <- lapply(seq_len(num_search_terms()), function(i) {
+        search_term_id <- paste0("search_term_", i)
+        search_tag_id <- paste0("search_tag_", i)
+        paste(input[[search_term_id]], input[[search_tag_id]])
+      })
+      search_query <- paste(query_parts, collapse = " AND ")
+      
+      my_query <- get_pubmed_ids(search_query)
       my_abstracts_xml <- fetch_pubmed_data(my_query)
       all_xml <- articles_to_list(my_abstracts_xml, simplify = F)
       rv$data <- lapply(all_xml, article_to_df, max_chars = -1, getAuthors = FALSE, getKeywords=T) %>% bind_rows()
     }
     
-    
     output$result <- renderTable({
       req(rv$data)
       rv$data
     }, rownames = FALSE)
-    
   })
   
+  observeEvent(input$add, {
+    num_search_terms(num_search_terms() + 1)
+    new_term_id <- num_search_terms()
+    search_term_id <- paste0("search_term_", new_term_id)
+    search_tag_id <- paste0("search_tag_", new_term_id)
+    tag_list = list("All Fields" = "[all]",
+                    "Author" = "[au]",
+                    "Editor" = "[ed]",
+                    "Journal" = "[ta]",
+                    "Language" = "[la]",
+                    "MeSH Terms" = "[mh]",
+                    "Publication Date" = "[dp]",
+                    "Title" = "[ti]",
+                    "Title/Abstract" = "[tiab]")
+    insertUI(
+      selector = "#search_terms",
+      ui = tags$div(
+        id = paste0("div_", new_term_id),
+        textInput(search_term_id, "Search term"),
+        selectInput(search_tag_id, "Search tag", choices = tag_list)
+      )
+    )
+  })
   observeEvent(input$submit, {
     req(rv$data)
     
